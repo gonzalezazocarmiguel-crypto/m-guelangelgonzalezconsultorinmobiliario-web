@@ -36,6 +36,9 @@ yarn-error.log*
 # vercel
 .vercel
 
+# crm local database (contains scraped leads + Apify credentials)
+/data/*.sqlite
+
 # typescript
 *.tsbuildinfo
 next-env.d.ts
