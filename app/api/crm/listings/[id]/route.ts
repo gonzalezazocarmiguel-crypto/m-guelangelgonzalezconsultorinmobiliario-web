@@ -18,7 +18,7 @@ export async function PATCH(
     );
   }
 
-  const listing = updateListingStatus(id, status);
+  const listing = await updateListingStatus(id, status);
   if (!listing) {
     return NextResponse.json({ error: "Anuncio no encontrado." }, { status: 404 });
   }

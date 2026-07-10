@@ -3,7 +3,7 @@ import { getSettings, listListings, upsertListings } from "@/lib/db";
 import { normalizeListing, runApifyActor } from "@/lib/apify";
 
 export async function POST() {
-  const settings = getSettings();
+  const settings = await getSettings();
 
   if (!settings.apiKey || !settings.actorId) {
     return NextResponse.json(
@@ -50,13 +50,13 @@ export async function POST() {
     raw: item.raw,
   }));
 
-  const { inserted, updated } = upsertListings(toStore);
+  const { inserted, updated } = await upsertListings(toStore);
 
   return NextResponse.json({
     scraped: items.length,
     matched: filtered.length,
     inserted,
     updated,
-    listings: listListings(),
+    listings: await listListings(),
   });
 }

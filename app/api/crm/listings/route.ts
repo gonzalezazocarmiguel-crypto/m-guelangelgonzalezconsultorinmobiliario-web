@@ -11,5 +11,5 @@ export async function GET(request: Request) {
       ? (statusParam as ListingStatus)
       : undefined;
 
-  return NextResponse.json({ listings: listListings(status) });
+  return NextResponse.json({ listings: await listListings(status) });
 }
