@@ -1,9 +1,20 @@
 import { NextResponse } from "next/server";
-import { getSettings, listListings, upsertListings } from "@/lib/db";
+import { getSettings, listListings, upsertListings, isMissingDatabaseError } from "@/lib/db";
 import { normalizeListing, runApifyActor } from "@/lib/apify";
 
 export async function POST() {
-  const settings = await getSettings();
+  let settings;
+  try {
+    settings = await getSettings();
+  } catch (err) {
+    if (isMissingDatabaseError(err)) {
+      return NextResponse.json(
+        { error: "Falta conectar la base de datos Postgres en Vercel (Storage → Create Database)." },
+        { status: 503 }
+      );
+    }
+    throw err;
+  }
 
   if (!settings.apiKey || !settings.actorId) {
     return NextResponse.json(

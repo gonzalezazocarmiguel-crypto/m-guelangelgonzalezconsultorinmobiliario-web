@@ -1,9 +1,19 @@
 import { NextResponse } from "next/server";
-import { getSettings, saveSettings } from "@/lib/db";
+import { getSettings, saveSettings, isMissingDatabaseError } from "@/lib/db";
+
+const DB_ERROR_RESPONSE = NextResponse.json(
+  { error: "Falta conectar la base de datos Postgres en Vercel (Storage → Create Database)." },
+  { status: 503 }
+);
 
 export async function GET() {
-  const settings = await getSettings();
-  return NextResponse.json(settings);
+  try {
+    const settings = await getSettings();
+    return NextResponse.json(settings);
+  } catch (err) {
+    if (isMissingDatabaseError(err)) return DB_ERROR_RESPONSE;
+    throw err;
+  }
 }
 
 export async function POST(request: Request) {
@@ -24,6 +34,11 @@ export async function POST(request: Request) {
     }
   }
 
-  await saveSettings({ apiKey, actorId, inputTemplate });
-  return NextResponse.json(await getSettings());
+  try {
+    await saveSettings({ apiKey, actorId, inputTemplate });
+    return NextResponse.json(await getSettings());
+  } catch (err) {
+    if (isMissingDatabaseError(err)) return DB_ERROR_RESPONSE;
+    throw err;
+  }
 }

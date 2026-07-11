@@ -1,5 +1,5 @@
 import { NextResponse } from "next/server";
-import { listListings, type ListingStatus } from "@/lib/db";
+import { listListings, isMissingDatabaseError, type ListingStatus } from "@/lib/db";
 
 const VALID_STATUSES: ListingStatus[] = ["CONTACTAR", "CONTACTADO", "CAPTADO", "DESCARTADO"];
 
@@ -11,5 +11,15 @@ export async function GET(request: Request) {
       ? (statusParam as ListingStatus)
       : undefined;
 
-  return NextResponse.json({ listings: await listListings(status) });
+  try {
+    return NextResponse.json({ listings: await listListings(status) });
+  } catch (err) {
+    if (isMissingDatabaseError(err)) {
+      return NextResponse.json(
+        { error: "Falta conectar la base de datos Postgres en Vercel (Storage → Create Database)." },
+        { status: 503 }
+      );
+    }
+    throw err;
+  }
 }

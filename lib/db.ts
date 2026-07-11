@@ -1,6 +1,4 @@
-import { createClient } from "@libsql/client";
-import path from "node:path";
-import fs from "node:fs";
+import { neon, type NeonQueryFunction } from "@neondatabase/serverless";
 
 export type ListingStatus = "CONTACTAR" | "CONTACTADO" | "CAPTADO" | "DESCARTADO";
 
@@ -26,28 +24,30 @@ export type ApifySettings = {
   inputTemplate: string;
 };
 
-function resolveLocalDbUrl(): string {
-  const dataDir = path.join(process.cwd(), "data");
-  if (!fs.existsSync(dataDir)) {
-    fs.mkdirSync(dataDir, { recursive: true });
-  }
-  return `file:${path.join(dataDir, "crm.sqlite")}`;
-}
+// Populated automatically when you attach a Vercel Postgres (Neon) database
+// to the project. Resolved lazily (not at import time) so the app can still
+// build/boot before a database is connected.
+let sqlClient: NeonQueryFunction<false, false> | null = null;
 
-// In production, point TURSO_DATABASE_URL/TURSO_AUTH_TOKEN at a Turso database
-// (serverless hosts like Vercel wipe the local filesystem between requests).
-// Locally, without those env vars, it falls back to a SQLite file on disk.
-const client = createClient({
-  url: process.env.TURSO_DATABASE_URL || resolveLocalDbUrl(),
-  authToken: process.env.TURSO_AUTH_TOKEN,
-});
+function db(): NeonQueryFunction<false, false> {
+  if (!sqlClient) {
+    const connectionString = process.env.DATABASE_URL || process.env.POSTGRES_URL;
+    if (!connectionString) {
+      throw new Error(
+        "Falta DATABASE_URL/POSTGRES_URL. Conecta una base de datos Postgres (Neon) al proyecto en Vercel."
+      );
+    }
+    sqlClient = neon(connectionString);
+  }
+  return sqlClient;
+}
 
 let ready: Promise<void> | null = null;
 
 function ensureReady(): Promise<void> {
   if (!ready) {
     ready = (async () => {
-      await client.execute(`
+      await db()`
         CREATE TABLE IF NOT EXISTS settings (
           id INTEGER PRIMARY KEY CHECK (id = 1),
           apify_api_key TEXT NOT NULL DEFAULT '',
@@ -55,8 +55,8 @@ function ensureReady(): Promise<void> {
           input_template TEXT NOT NULL DEFAULT '',
           updated_at TEXT NOT NULL
         )
-      `);
-      await client.execute(`
+      `;
+      await db()`
         CREATE TABLE IF NOT EXISTS listings (
           id TEXT PRIMARY KEY,
           source_url TEXT,
@@ -72,7 +72,7 @@ function ensureReady(): Promise<void> {
           created_at TEXT NOT NULL,
           updated_at TEXT NOT NULL
         )
-      `);
+      `;
     })();
   }
   return ready;
@@ -89,38 +89,39 @@ const DEFAULT_INPUT_TEMPLATE = JSON.stringify(
   2
 );
 
+export function isMissingDatabaseError(err: unknown): boolean {
+  return err instanceof Error && err.message.includes("DATABASE_URL");
+}
+
 export async function getSettings(): Promise<ApifySettings> {
   await ensureReady();
-  const result = await client.execute(
-    "SELECT apify_api_key, apify_actor_id, input_template FROM settings WHERE id = 1"
-  );
-  const row = result.rows[0] as unknown as
-    | { apify_api_key: string; apify_actor_id: string; input_template: string }
-    | undefined;
+  const rows = (await db()`
+    SELECT apify_api_key, apify_actor_id, input_template FROM settings WHERE id = 1
+  `) as { apify_api_key: string; apify_actor_id: string; input_template: string }[];
+  const row = rows[0];
 
   if (!row) {
     return { apiKey: "", actorId: "", inputTemplate: DEFAULT_INPUT_TEMPLATE };
   }
 
   return {
-    apiKey: String(row.apify_api_key ?? ""),
-    actorId: String(row.apify_actor_id ?? ""),
-    inputTemplate: String(row.input_template || DEFAULT_INPUT_TEMPLATE),
+    apiKey: row.apify_api_key ?? "",
+    actorId: row.apify_actor_id ?? "",
+    inputTemplate: row.input_template || DEFAULT_INPUT_TEMPLATE,
   };
 }
 
 export async function saveSettings(settings: ApifySettings): Promise<void> {
   await ensureReady();
-  await client.execute({
-    sql: `INSERT INTO settings (id, apify_api_key, apify_actor_id, input_template, updated_at)
-          VALUES (1, ?, ?, ?, ?)
-          ON CONFLICT(id) DO UPDATE SET
-            apify_api_key = excluded.apify_api_key,
-            apify_actor_id = excluded.apify_actor_id,
-            input_template = excluded.input_template,
-            updated_at = excluded.updated_at`,
-    args: [settings.apiKey, settings.actorId, settings.inputTemplate, new Date().toISOString()],
-  });
+  await db()`
+    INSERT INTO settings (id, apify_api_key, apify_actor_id, input_template, updated_at)
+    VALUES (1, ${settings.apiKey}, ${settings.actorId}, ${settings.inputTemplate}, ${new Date().toISOString()})
+    ON CONFLICT (id) DO UPDATE SET
+      apify_api_key = EXCLUDED.apify_api_key,
+      apify_actor_id = EXCLUDED.apify_actor_id,
+      input_template = EXCLUDED.input_template,
+      updated_at = EXCLUDED.updated_at
+  `;
 }
 
 function rowToListing(row: Record<string, unknown>): Listing {
@@ -143,14 +144,11 @@ function rowToListing(row: Record<string, unknown>): Listing {
 
 export async function listListings(status?: ListingStatus): Promise<Listing[]> {
   await ensureReady();
-  const result = status
-    ? await client.execute({
-        sql: "SELECT * FROM listings WHERE status = ? ORDER BY created_at DESC",
-        args: [status],
-      })
-    : await client.execute("SELECT * FROM listings ORDER BY created_at DESC");
+  const rows = status
+    ? await db()`SELECT * FROM listings WHERE status = ${status} ORDER BY created_at DESC`
+    : await db()`SELECT * FROM listings ORDER BY created_at DESC`;
 
-  return result.rows.map((row) => rowToListing(row as Record<string, unknown>));
+  return (rows as Record<string, unknown>[]).map(rowToListing);
 }
 
 export type UpsertListingInput = Omit<Listing, "status" | "createdAt" | "updatedAt">;
@@ -164,52 +162,31 @@ export async function upsertListings(
   const now = new Date().toISOString();
 
   for (const item of items) {
-    const existing = await client.execute({
-      sql: "SELECT id FROM listings WHERE id = ?",
-      args: [item.id],
-    });
+    const existing = await db()`SELECT id FROM listings WHERE id = ${item.id}`;
 
-    if (existing.rows.length > 0) {
-      await client.execute({
-        sql: `UPDATE listings SET
-                source_url = ?, location = ?, price = ?, owner_name = ?, contact_phone = ?,
-                size_m2 = ?, zone = ?, title = ?, raw = ?, updated_at = ?
-              WHERE id = ?`,
-        args: [
-          item.sourceUrl,
-          item.location,
-          item.price,
-          item.ownerName,
-          item.contactPhone,
-          item.sizeM2,
-          item.zone,
-          item.title,
-          item.raw,
-          now,
-          item.id,
-        ],
-      });
+    if (existing.length > 0) {
+      await db()`
+        UPDATE listings SET
+          source_url = ${item.sourceUrl},
+          location = ${item.location},
+          price = ${item.price},
+          owner_name = ${item.ownerName},
+          contact_phone = ${item.contactPhone},
+          size_m2 = ${item.sizeM2},
+          zone = ${item.zone},
+          title = ${item.title},
+          raw = ${item.raw},
+          updated_at = ${now}
+        WHERE id = ${item.id}
+      `;
       updated++;
     } else {
-      await client.execute({
-        sql: `INSERT INTO listings
-                (id, source_url, location, price, owner_name, contact_phone, size_m2, zone, title, raw, status, created_at, updated_at)
-              VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'CONTACTAR', ?, ?)`,
-        args: [
-          item.id,
-          item.sourceUrl,
-          item.location,
-          item.price,
-          item.ownerName,
-          item.contactPhone,
-          item.sizeM2,
-          item.zone,
-          item.title,
-          item.raw,
-          now,
-          now,
-        ],
-      });
+      await db()`
+        INSERT INTO listings
+          (id, source_url, location, price, owner_name, contact_phone, size_m2, zone, title, raw, status, created_at, updated_at)
+        VALUES
+          (${item.id}, ${item.sourceUrl}, ${item.location}, ${item.price}, ${item.ownerName}, ${item.contactPhone}, ${item.sizeM2}, ${item.zone}, ${item.title}, ${item.raw}, 'CONTACTAR', ${now}, ${now})
+      `;
       inserted++;
     }
   }
@@ -222,14 +199,10 @@ export async function updateListingStatus(
   status: ListingStatus
 ): Promise<Listing | null> {
   await ensureReady();
-  await client.execute({
-    sql: "UPDATE listings SET status = ?, updated_at = ? WHERE id = ?",
-    args: [status, new Date().toISOString(), id],
-  });
-  const result = await client.execute({
-    sql: "SELECT * FROM listings WHERE id = ?",
-    args: [id],
-  });
-  const row = result.rows[0] as Record<string, unknown> | undefined;
+  await db()`
+    UPDATE listings SET status = ${status}, updated_at = ${new Date().toISOString()} WHERE id = ${id}
+  `;
+  const rows = await db()`SELECT * FROM listings WHERE id = ${id}`;
+  const row = rows[0] as Record<string, unknown> | undefined;
   return row ? rowToListing(row) : null;
 }
